@@ -1,0 +1,1801 @@
+# Short-term rentals in Ottawa: UPGo city spotlight
+
+<style type="text/css">
+  body{
+  font-family: Futura, Helvetica, Arial;
+}
+</style>
+
+<br>
+
+```{r setup, include = FALSE, echo = FALSE}
+
+library(here)
+source(here("R", "0_startup.R"))
+qload(here("output", "str_processed.qsm"), nthreads = availableCores())
+qload(here("output", "geometry.qsm"), nthreads = availableCores())
+
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(include = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+```
+
+```{r new_objects, cache = TRUE, cache.lazy = FALSE}
+
+displayed_listings_all <-
+  daily_all %>% 
+  filter(housing) %>% 
+  count(date, min_30 = minimum_stay >= 30, blocked = status == "B") %>% 
+  group_by(min_30, blocked) %>% 
+  mutate(n = slide_dbl(n, mean, .before = 3, .after = 3, .complete = TRUE)) %>% 
+  ungroup() %>% 
+  drop_na() %>% 
+  group_by(date, min_30) %>% 
+  mutate(n = if_else(blocked == TRUE, sum(n), n)) %>% 
+  ungroup() %>% 
+  mutate(blocked = if_else(blocked == TRUE, "Displayed listings", 
+                           "Active listings"))
+
+# 2019 active
+active_2019 <- 
+  daily |> 
+  filter(status %in% c("R", "A"), year(date) == 2019, month(date) <= 10) |> 
+  pull(property_ID) |> 
+  unique()
+  
+# 2019 revenue
+revenue_2019 <-
+  daily |> 
+  filter(status == "R", year(date) == 2019, month(date) <= 10) |> 
+  group_by(property_ID) |> 
+  summarize(revenue_2019 = sum(price), .groups = "drop") |> 
+  inner_join(property, by = "property_ID")
+
+# 2021 active
+active_2021 <- 
+  daily |> 
+  filter(status %in% c("R", "A"), year(date) == 2021) |> 
+  pull(property_ID) |> 
+  unique()
+
+# 2021 revenue
+revenue_2021 <-
+  daily |> 
+  filter(status == "R", year(date) == 2021) |> 
+  group_by(property_ID) |> 
+  summarize(revenue_2021 = sum(price), .groups = "drop") |> 
+  inner_join(property, by = "property_ID")
+
+# Active listings
+active_listings <- 
+  daily |> 
+  filter(status != "B") |> 
+  count(date, listing_type) |> 
+  group_by(listing_type) %>% 
+  mutate(n = slide_dbl(n, mean, .before = 3, .after = 3, .complete = TRUE)) %>% 
+  ungroup()
+
+active_listings <- 
+  daily %>% 
+  filter(status != "B") %>% 
+  count(date) %>% 
+  mutate(n = slide_dbl(n, mean, .before = 3, .after = 3, .complete = TRUE),
+         listing_type = "All listings") %>% 
+  bind_rows(active_listings) %>% 
+  arrange(date, listing_type)
+
+# Daily variation
+daily_variation <- 
+  daily %>% 
+  filter(housing, status != "B", date != "2020-02-29") %>% 
+  group_by(date) %>% 
+  summarize("Active listings" = n(), Revenue = sum(price[status == "R"])) %>% 
+  mutate(across(where(is.numeric), 
+                function(x) slide_dbl(x, ~{(.x[366] - .x[1]) / .x[1]}, 
+                                      .before = 365, .complete = FALSE))) %>% 
+  pivot_longer(-date, names_to = "var", values_to = "value") %>% 
+  group_by(var) %>% 
+  mutate(value = slide_dbl(value, mean, .before = 6, .after = 7, 
+                           .complete = TRUE)) %>% 
+  ungroup() %>% 
+  filter(date >= "2016-01-01")
+
+# Nbhd breakdown
+nbhd_breakdown <- 
+  daily %>% 
+  filter(status != "B", year(date) >= 2019) %>% 
+  group_by(date, nbhd) %>% 
+  summarize(n = n(),
+            revenue = sum(price[status == "R"])) %>% 
+  left_join(st_drop_geometry(nbhd)) %>% 
+  group_by(nbhd, dwellings) %>% 
+  summarize(active_listings = mean(n[year(date) == 2021]),
+            active_2019 = mean(n[year(date) == 2019 & month(date) <= 10]),
+            active_growth = (active_listings - active_2019) / active_2019,
+            annual_rev = sum(revenue[year(date) == 2021]),
+            rev_2019 = sum(revenue[year(date) == 2019 & month(date) <= 10]),
+            rev_growth = (annual_rev - rev_2019) / rev_2019,
+            .groups = "drop") %>% 
+  mutate(listings_pct = active_listings / sum(active_listings, na.rm = TRUE),
+         listings_pct_dwellings = active_listings / dwellings,
+         rev_pct = annual_rev / sum(annual_rev)) %>% 
+  select(nbhd, active_listings, active_growth, listings_pct,
+         listings_pct_dwellings, annual_rev, rev_pct, rev_growth)
+
+# Active listings by nbhd
+active_nbhd <-
+  daily |> 
+  filter(status != "B", year(date) == 2021) %>%
+  count(nbhd, date) %>% 
+  group_by(nbhd) %>% 
+  summarize(n = mean(n, na.rm = TRUE)) %>%
+  left_join(nbhd, .) %>% 
+  mutate(percentage = n / dwellings, n = round(n, digit = -1)) %>% 
+  select(nbhd, n, dwellings, percentage)
+
+# Active listings by DA
+active_DA <-
+  daily |> 
+  filter(status != "B", year(date) == 2021) %>%
+  left_join(select(st_drop_geometry(property), property_ID, GeoUID)) %>% 
+  count(GeoUID, date) %>% 
+  group_by(GeoUID) %>% 
+  summarize(n = mean(n, na.rm = TRUE)) %>%
+  left_join(DA, .) %>% 
+  mutate(percentage = n / dwellings, n = round(n, digit = -1),
+         percentage = if_else(dwellings <= 4, NA_real_, percentage)) %>% 
+  relocate(geometry, .after = last_col())
+
+# Listing type breakdown
+listing_type_breakdown <- 
+  daily %>% 
+  filter(status != "B", year(date) == 2021) %>%
+  group_by(listing_type) %>% 
+  summarize(
+    active_listings = n() / 304,
+    revenue = sum(price[status == "R"]),
+    .groups = "drop") %>% 
+  mutate(pct_of_listings = active_listings / sum(active_listings),
+         pct_of_revenue = revenue / sum(revenue))
+
+listing_type_breakdown <- 
+  daily %>% 
+  filter(status != "B", year(date) == 2019, month(date) <= 10) %>%
+  group_by(listing_type) %>% 
+  summarize(active_2019 = n() / 304) %>% 
+  left_join(listing_type_breakdown, .) %>% 
+  mutate(pct_listing_growth = (active_listings - active_2019) / active_2019) %>% 
+  select(-active_2019)
+
+# Host revenue table for calculations and table
+host_rev <-
+  daily %>%
+    filter(status == "R", year(date) == 2021, !is.na(host_ID)) %>%
+  group_by(host_ID) %>%
+  summarize(rev = sum(price))
+
+host_rev19 <-
+  daily %>%
+  filter(status == "R", year(date) == 2019, month(date) <= 10, !is.na(host_ID)) %>%
+  group_by(host_ID) %>%
+  summarize(rev = sum(price))
+
+# Active listing YOY change 2019-2021
+active_yoy_change <- 
+  daily %>% 
+  filter(status != "B", year(date) %in% c(2019, 2021), month(date) <= 10) %>% 
+  group_by(year_2021 = year(date) == 2021) %>% 
+  summarize(active_listings = n() / 304,
+            revenue = sum(price[status == "R"]), .groups = "drop") %>% 
+  summarize(across(c(active_listings, revenue), ~{(.x[2] - .x[1]) / .x[1]}),
+            .groups = "drop")
+
+active_yoy_listings <- 
+  active_yoy_change$active_listings %>% 
+  {. * -1} %>% 
+  scales::percent(accuracy = 0.1)
+
+active_yoy_revenue <- 
+  active_yoy_change$revenue %>% 
+  scales::percent(accuracy = 0.1)
+
+# Active listing YOY change 2018-2019
+active_yoy_change19 <- 
+  daily %>% 
+  filter(status != "B", year(date) %in% c(2018, 2019)) %>% 
+  group_by(year_2019 = year(date) == 2019) %>% 
+  summarize(active_listings = n() / 365,
+            revenue = sum(price[status == "R"]), .groups = "drop") %>% 
+  summarize(across(c(active_listings, revenue), ~{(.x[2] - .x[1]) / .x[1]}),
+            .groups = "drop")
+
+active_yoy_listings19 <- 
+  active_yoy_change19$active_listings %>% 
+  {. * -1} %>% 
+  scales::percent(accuracy = 0.1)
+
+active_yoy_revenue19 <- 
+  active_yoy_change19$revenue %>% 
+  scales::percent(accuracy = 0.1)
+
+
+```
+
+```{r exec_summ, cache = TRUE, cache.lazy = FALSE}
+
+# Average active and blocked daily listings in 2021
+avg_listings <-
+  daily %>%
+  filter(year(date) == 2021) %>%
+  count(date, B = status == "B") %>%
+  group_by(B) %>%
+  summarize(avg = mean(n), .groups = "drop")
+
+avg_listings_active <-
+  avg_listings$avg[1] %>%
+  scales::comma(10)
+
+# # Average active and blocked daily listings in 2019
+# avg_listings19 <- 
+#   daily %>% 
+#   filter(housing, date >= start_2019, date <= end_2019) %>% 
+#   count(date, B = status == "B") %>% 
+#   group_by(B) %>% 
+#   summarize(avg = round(mean(n), digit = -1), .groups = "drop")
+# 
+# avg_listings_active19 <- 
+#   avg_listings19$avg[1] %>% 
+#   prettyNum(",")
+
+# Total annual revenue in 2021
+annual_rev <-
+  revenue_2021$revenue_2021 |> 
+  sum() |> 
+  scales::dollar(0.1, scale = 1 / 1000000, suffix = " million")
+
+# EH listings
+eh_listings <-
+  listing_type_breakdown %>%
+  filter(listing_type == "Entire home/apt") %>%
+  pull(pct_of_listings) %>%
+  scales::percent(0.1)
+
+# EH revenue
+eh_revenue <-
+  listing_type_breakdown %>%
+  filter(listing_type == "Entire home/apt") %>%
+  pull(pct_of_revenue) %>%
+  scales::percent(0.1)
+
+# # Host revenue in 2020
+# host_rev_top_10 <- 
+#   host_rev %>% 
+#   summarize(top_10 = sum(rev[rev > quantile(rev, .9)]) / sum(rev)) %>% 
+#   pull(top_10) %>% 
+#   scales::percent(0.1)
+# 
+# host_rev_top_1 <- 
+#   host_rev %>% 
+#   summarize(top_1 = sum(rev[rev > quantile(rev, .99)]) / sum(rev)) %>% 
+#   pull(top_1) %>% 
+#   scales::percent(0.1)
+# 
+# # Host revenue in 2019
+# host_rev_top_10_2019 <- 
+#   host_rev19 %>% 
+#   summarize(top_10 = sum(rev[rev > quantile(rev, .9)]) / sum(rev)) %>% 
+#   pull(top_10) %>% 
+#   scales::percent(0.1)
+# 
+# host_rev_top_1_2019 <- 
+#   host_rev19 %>% 
+#   summarize(top_1 = sum(rev[rev > quantile(rev, .99)]) / sum(rev)) %>% 
+#   pull(top_1) %>% 
+#   scales::percent(0.1)
+# 
+# 2021 ML listings
+ml_listings <-
+  daily %>%
+  filter(status != "B", year(date) == 2021) %>%
+  count(multi) %>%
+  summarize(ML = n[2] / sum(n)) %>%
+  pull(ML) %>%
+  scales::percent(0.1)
+
+# 2021 ML revenue
+ml_revenue <-
+  daily %>%
+  filter(status == "R", year(date) == 2021) %>%
+  group_by(multi) %>%
+  tally(price) %>%
+  summarize(multi_rev = n[2] / sum(n)) %>%
+  pull(multi_rev) %>%
+  scales::percent(0.1)
+
+# 2019 ML listings
+ml_listings19 <-
+  daily %>%
+  filter(status != "B", year(date) == 2019) %>%
+  count(multi) %>%
+  summarize(ML = n[2] / sum(n)) %>%
+  pull(ML) %>%
+  scales::percent(0.1)
+
+# 2019 ML revenue
+ml_revenue19 <-
+  daily %>%
+  filter(status == "R", year(date) == 2019) %>%
+  group_by(multi) %>%
+  tally(price) %>%
+  summarize(multi_rev = n[2] / sum(n)) %>%
+  pull(multi_rev) %>%
+  scales::percent(0.1)
+
+```
+
+**There were `r avg_listings_active` active STR listings in Ottawa housing units in 2021, which collectively earned `r annual_rev`. This is a dramatic decline in comparison with 2019; the COVID-19 pandemic reduced reservations by 65.1% compared to the previous growth trend. Nearly a fifth of all listings are in the Byward Market and Lowertown neighbourhoods. More than three fifths (`r eh_listings`) of Ottawa’s STR listings are entire homes, and entire homes are responsible for `r eh_revenue` of all revenue. Revenue is concentrated unevenly among hosts, with the top 10% earning 56.7% of revenue, and the top 1% earning 20.9%. Commercial operators who control multiple STR listings account for `r ml_listings` of listings and `r ml_revenue` of revenue. Dedicated STRs were taking 610 housing units off of Ottawa’s long-term market at the end of 2021—down from a 2019 peak of more than 1,200. At the end of 2021, 62.3% of entire-home listings and 29.5% of private-room listings were being operated in a full-time fashion. Prior to the pandemic in the Byward Market neighbourhood, there were approximately the same number of dedicated STRs as there were vacant apartments available to rent.**
+
+<br>
+
+## The City of Ottawa's STR bylaws
+
+In November 2019, Ottawa's City Council approved a plan for a short-term rental (STR) regulation pilot program. Developed in more detail in 2021, the pilot program calls for STRs to be licensed by the City, and for most STRs (defined as rentals offered for fewer than 30 nights) to be limited to hosts' principal residences. While the implementation of the bylaws intended to enact this program has been delayed by legal challenges, a better understanding of the character, extent and impacts of STRs in the City of Ottawa remains in the public interest. Accordingly, this brief report provides:
+
+1. A general market overview of short-term rentals (STRs) in Ottawa, including the volume, revenue, type, size and distribution of units, the presence of dedicated commercial operations.
+2. An exploration of the impact of Covid-19 on short-term rentals, using counterfactual trend analysis.
+3. An estimate of the impact of STRs on Ottawa’s housing market, in particular the number of housing units taken off the long-term market.
+
+
+## Active daily listings and annual revenue
+
+```{r para_1, cache = TRUE, cache.lazy = FALSE}
+
+# Average active and blocked daily listings in 2021
+avg_listings <-
+  daily |> 
+  filter(year(date) == 2021) |> 
+  count(date, B = status == "B") |>
+  group_by(B) |> 
+  summarize(avg = mean(n), .groups = "drop")
+
+avg_listings_active <-
+  avg_listings$avg[1] |> 
+  scales::comma(10)
+
+# Average active and blocked daily listings in 2019
+avg_listings19 <-
+  daily |> 
+  filter(year(date) == 2019, month(date) <= 10) |> 
+  count(date, B = status == "B") |> 
+  group_by(B) |> 
+  summarize(avg = mean(n), .groups = "drop")
+
+avg_listings_active19 <-
+  avg_listings19$avg[1] |> 
+  scales::comma(10)
+
+# Average number of hosts in 2021 (taking out blocked 365 days)
+avg_hosts <-
+  daily |> 
+  filter(year(date) == 2021, status != "B") |> 
+  count(date, host_ID) |> 
+  count(date) |> 
+  summarize(hosts = mean(n), .groups = "drop") |> 
+  pull(hosts) |> 
+  scales::comma(10)
+
+# Average number of hosts in 2019 (taking out blocked 365 days)
+avg_hosts19 <-
+  daily %>%
+  filter(year(date) == 2019, month(date) <= 10, status != "B") |> 
+  count(date, host_ID) |> 
+  count(date) |> 
+  summarize(hosts = mean(n), .groups = "drop") |> 
+  pull(hosts) |> 
+  scales::comma(10)
+
+# Total annual revenue in 2021
+annual_rev <-
+  revenue_2021$revenue_2021 |> 
+  sum() |> 
+  scales::dollar(0.1, scale = 1 / 1000000, suffix = " million")
+
+# Average revenue per active listing in 2020
+avg_rev_per_listing <-
+  (sum(revenue_2021$revenue_2021) /
+    daily %>%
+    filter(status != "B", year(date) == 2021) %>%
+    count(date) %>%
+    summarize(avg_rev_per_active = mean(n), .groups = "drop") |> 
+     pull()) %>%
+  scales::dollar(100)
+
+#' Average revenue per active host in 2021
+avg_rev_per_host <-
+  (sum(revenue_2021$revenue_2021) /
+    daily %>%
+    filter(status != "B", year(date) == 2021) %>%
+    group_by(date) %>%
+    summarize(n_hosts = length(unique(host_ID)), .groups = "drop_last") %>%
+    summarize(avg_n_hosts = round(mean(n_hosts)), .groups = "drop")) %>%
+  pull() %>%
+  scales::dollar(100)
+
+#' Average revenue per active host in 2019
+avg_rev_per_host19 <-
+  (sum(revenue_2019$revenue_2019) /
+    daily %>%
+    filter(status != "B", year(date) == 2019, month(date) <= 10) %>%
+    group_by(date) %>%
+    summarize(n_hosts = length(unique(host_ID)), .groups = "drop_last") %>%
+    summarize(avg_n_hosts = round(mean(n_hosts)), .groups = "drop")) %>%
+  pull() %>%
+  scales::dollar(100)
+
+```
+```{r para_2, cache = TRUE, cache.lazy = FALSE}
+
+# Average blocked daily listings in 2021
+avg_listings_blocked <-
+  avg_listings$avg[2] %>%
+  scales::comma(10)
+
+# Average revenue per all listings in 2021
+avg_revenue_all_listings <-
+  revenue_2021$revenue_2021 %>%
+  mean() %>%
+  scales::dollar(100)
+
+# Average revenue per all hosts in 2021
+avg_revenue_all_hosts <-
+  revenue_2021 %>%
+  filter(!is.na(host_ID)) %>%
+  group_by(host_ID) %>%
+  summarize(host_rev = sum(revenue_2021)) %>%
+  summarize(avg_host_rev = mean(host_rev)) %>%
+  pull(avg_host_rev) %>%
+  scales::dollar(100)
+
+# Non-housing active listings in 2021
+non_housing_listings <-
+  daily_all %>%
+  filter(!housing, status != "B", year(date) == 2021) %>%
+  count(date) %>%
+  summarize(non_housing = mean(n)) %>%
+  pull(non_housing) %>%
+  scales::comma(10)
+
+```
+
+```{r make_fig_1}
+
+figure_1_fun <- function() {
+  
+displayed_listings_all |> 
+  mutate(label = case_when(
+    date == "2016-05-01" & min_30 & blocked == "Active listings" ~ "Active LTR listings",
+    date == "2018-01-01" & !min_30 & blocked == "Active listings" ~ "Active STR listings",
+    date == "2020-01-01" & min_30 & blocked == "Displayed listings" ~ "Displayed LTR listings",
+    date == "2017-06-01" & !min_30 & blocked == "Displayed listings" ~ "Displayed STR listings",
+    TRUE ~ NA_character_)) |>
+  ggplot(aes(date, n, colour = blocked, linetype = min_30)) +
+  geom_line(lwd = 1.5) +
+  geom_label(aes(label = label), size = 3) +
+  scale_y_continuous(name = NULL, label = scales::comma) +
+  scale_x_date(name = NULL, limits = c(as.Date("2015-01-01"), NA)) +
+  scale_linetype_discrete(name = NULL, labels = c("STR", "LTR")) +
+  scale_colour_manual(name = NULL, values = col_palette[c(5, 1:3)]) +
+  scale_size_manual(values = c("All listings" = 1.5, "Entire home/apt" = 0.75,
+                               "Private room" = 0.75, "Shared room" = 0.75),
+                    guide = "none") +
+  theme_minimal() +
+  theme(legend.position = "none", panel.grid.minor.x = element_blank()
+  )
+
+}
+
+ggsave(here("output", "figures", "figure_1.pdf"), plot = figure_1_fun(), 
+       width = 8, height = 5, units = "in", useDingbats = FALSE)
+
+```
+
+Active daily listings are listings which were displayed on Airbnb or Vrbo on a given day, and were either reserved or available for a reservation. It is the most reliable means of determining the overall size of the STR market in a location, particularly with respect to change over time. Figure \@ref(fig:active_graph) shows the total number of listings displayed each day on Airbnb and Vrbo alongside active daily listings. In both cases we distinguish between short-term rentals (“STRs”, which have minimum reservations of fewer than 30 days, and which will be subject to the City's STR rules if the latter take effect) and long-term rentals (“LTRs”, which have minimum reservations of 30 days or more, and will not be subject to the City’s rules).
+
+```{r active_graph, include = TRUE, fig.cap = '(ref:active_graph)', fig.align = "center"}
+
+figure_1_fun()
+
+```
+
+(ref:active_graph) _Active daily STRs in the City of Ottawa (7-day average)_
+
+Ottawa's STR market grew rapidly from 2015 through the middle of 2017, peaking in terms of both displayed and active listings during the Canada 150 celebrations in July 2017. Since then, the number of displayed listings grew steadily until the beginning of the Covid-19 pandemic, while active listings grew more slowly. From January through October 2021 there was an average of `r avg_listings_active` active daily listings operated by an average of `r avg_hosts` hosts. During these ten months these hosts collectively earned `r annual_rev`—an average of `r avg_rev_per_listing` per daily active listing or `r avg_rev_per_host` per active host. Because of the collapse of STR demand during the pandemic, these numbers are substantially lower than during the same ten months of 2019, when there was an average of `r avg_listings_active19` active daily listings operated by `r avg_hosts19` hosts, who earned on average `r avg_rev_per_host19`.
+
+There was also a daily average of `r avg_listings_blocked` listings which were visible on the Airbnb and Vrbo websites in 2021 but were blocked by the host from receiving reservations. The presence of these listings can erroneously suggest that a city’s STR market is larger than it is. When these blocked but inactive listings are included, the average listing earned `r avg_revenue_all_listings` in 2021, and the average host earned `r avg_revenue_all_hosts`. Finally, there was a daily average of `r non_housing_listings` listings that were not located in private housing units (B&Bs, hotels, etc.), which have been excluded from the analysis in this report. All the material which follows pertain to short-term rentals located in Ottawa’s residential housing stock.
+
+<br>
+
+## Location of STR listings and revenue
+
+``` {r para_4}
+
+byward_listing_pct <-
+  nbhd_breakdown %>%
+  filter(nbhd == "Byward Market") %>%
+  pull(listings_pct) %>%
+  scales::percent(0.1)
+ 
+byward_rev_pct <-
+  nbhd_breakdown %>%
+  filter(nbhd == "Byward Market") %>%
+  pull(rev_pct) %>%
+  scales::percent(0.1)
+
+centretown_listing_pct <-
+  nbhd_breakdown %>%
+  filter(nbhd == "Centretown") %>%
+  pull(listings_pct) %>%
+  scales::percent(0.1)
+ 
+centretown_rev_pct <-
+  nbhd_breakdown %>%
+  filter(nbhd == "Centretown") %>%
+  pull(rev_pct) %>%
+  scales::percent(0.1)
+
+byward_per_cap <-
+  nbhd_breakdown %>%
+  filter(nbhd == "Byward Market") %>%
+  pull(listings_pct_dwellings) %>%
+  scales::percent(0.1)
+
+lowertown_per_cap <-
+  nbhd_breakdown %>%
+  filter(nbhd == "Lowertown") %>%
+  pull(listings_pct_dwellings) %>%
+  scales::percent(0.1)
+
+min_per_cap <-
+  nbhd_breakdown %>%
+  filter(active_listings > 20) %>%
+  pull(listings_pct_dwellings) %>%
+  min() %>%
+  scales::percent(0.1)
+
+max_per_cap <-
+  nbhd_breakdown %>%
+  filter(active_listings > 20,
+         !nbhd %in% c("Byward Market", "Lowertown")) %>%
+  pull(listings_pct_dwellings) %>%
+  max() %>%
+  scales::percent(0.1)
+
+```
+
+``` {r make_fig_2}
+
+figure_2_fun <- function() {
+  
+  left_map <-
+  active_DA %>%
+  ggplot() +
+  geom_sf(aes(fill = percentage), colour = "transparent") +
+  scale_fill_stepsn(colors = col_palette[c(4, 3, 5)],
+                       na.value = "grey80", n.breaks = 6,
+                       limits = c(0, 0.03), oob = scales::squish,
+                       labels = scales::percent_format(0.1))  +
+  guides(fill = guide_colourbar(title = "STRs/\ndwelling",
+                                title.vjust = 1)) +
+  gg_bbox(active_DA) +
+  theme_void() +
+  theme(text = element_text(face = "plain"),
+        legend.title = element_text(face = "bold", size = 7),
+        legend.title.align = 0.9,
+        legend.text = element_text(size = 5),
+        panel.background = element_rect(fill = "grey40", colour = NULL))
+
+right_map <-
+  active_DA %>%
+  ggplot() +
+  geom_sf(aes(fill = percentage), colour = "transparent") +
+  geom_sf(data = streets, colour = "white", alpha = 0.5) +
+  scale_fill_stepsn(colors = col_palette[c(4, 3, 5)],
+                       na.value = "grey80", n.breaks = 6,
+                       limits = c(0, 0.03), oob = scales::squish,
+                       labels = scales::percent_format(0.1))  +
+  guides(fill = guide_colourbar(title = "STRs/\ndwelling",
+                                title.vjust = 1)) +
+  coord_sf(xlim = st_bbox(active_DA)[c(1, 3)] * c(1.051, 0.972),
+           ylim = st_bbox(active_DA)[c(2, 4)] * c(1.0115, 0.996)) +
+  theme_void() +
+  theme(text = element_text(face = "plain"),
+        legend.title = element_text(face = "bold", size = 7),
+        legend.title.align = 0.9,
+        legend.text = element_text(size = 5),
+        panel.background = element_rect(fill = "grey40", colour = NULL))
+
+left_map + right_map + plot_layout(guide = "collect") &
+  theme(legend.position = "bottom", legend.key.width = unit(1.8, "lines"))
+
+}
+
+ggsave(here("output", "figures", "figure_2.pdf"), plot = figure_2_fun(),
+       width = 8, height = 4.2, units = "in", useDingbats = FALSE)
+
+```
+
+STR activity in Ottawa is highly concentrated downtown (Figure \@ref(fig:active_map)). In particular, the Centretown and Byward Market neighbourhoods accounts for `r centretown_listing_pct` and `r byward_listing_pct` of all listings respectively, and even higher shares of host revenue (`r centretown_rev_pct` and `r byward_rev_pct`). When measured in per-dwelling terms, Byward Market and Lowertown have the highest concentrations of STRs, at `r byward_per_cap` and `r lowertown_per_cap` of dwellings respectively. In all other neighbourhoods with at least 20 active STRs on average in 2021, STRs account for between `r min_per_cap` and `r max_per_cap` of total dwellings (Table \@ref(tab:tab-1)).
+
+``` {r active_map, include = TRUE, fig.cap = '(ref:active_map)', fig.align = "center"}
+
+figure_2_fun()
+
+```
+
+(ref:active_map) _Active STRs as a share of all dwelling units by dissemination area in Ottawa (L) and downtown (R)_
+
+``` {r tab-1, include = TRUE}
+
+library(kableExtra)
+
+nbhd_breakdown %>%
+  select(nb = nbhd, active_listings, active_growth, listings_pct_dwellings,
+         annual_rev, rev_growth) %>%
+  filter(active_listings > 20) %>%
+  arrange(-active_listings) %>%
+  mutate(active_listings = prettyNum(round(active_listings, -1), ","),
+         active_growth = scales::percent(active_growth, 0.1),
+         listings_pct_dwellings = scales::percent(listings_pct_dwellings, 0.1),
+         annual_rev = scales::dollar(annual_rev, 0.1, scale = 1 / 1000000),
+         rev_growth = scales::percent(rev_growth, 0.1)) %>%
+  add_row(nb = "City of Ottawa",
+          active_listings = avg_listings_active,
+          active_growth = paste0("-", active_yoy_listings),
+          listings_pct_dwellings = {
+            avg_listings_active %>%
+              parse_number() %>%
+              {. / sum(nbhd$dwellings)} %>%
+              scales::percent(0.1)},
+          annual_rev = str_remove(annual_rev, " million"),
+          rev_growth = active_yoy_revenue,
+          .before = 1) %>%
+  set_names(c("Neighbourhood",
+              "Active listings",
+              "Annual listing growth",
+              "Active listings as % of dwellings",
+              "Annual revenue (million)",
+              "Annual revenue growth")) %>%
+  kbl(caption = "Neighbourhoods with at least 20 daily active listings in 2021",
+               align = "lrrrrr") %>%
+  kable_styling(latex_options="scale_down") %>%
+  row_spec(1, background = paste0(col_palette[2], "50"))
+
+  
+```
+
+<br>
+
+## Listing types and sizes
+
+STRs listed on Airbnb can be one of four types: entire homes or apartments, private rooms, shared rooms, and hotel rooms. We have excluded the latter from our analysis, since we focus only on STRs located in housing units. Most policy attention has been focused on entire-home listings, both because these listings are most likely to generate harmful negative externalities, including housing loss and area nuisance, and because entire-home listings tend to be the most common. 
+
+``` {r para_5, cache = TRUE, cache.lazy = FALSE}
+
+bedrooms <- 
+  property %>% 
+  st_drop_geometry() %>% 
+  filter(property_ID %in% active_2021, listing_type == "Entire home/apt") %>% 
+  mutate(bedrooms = if_else(bedrooms >= 3, "3+", as.character(bedrooms))) %>% 
+  count(bedrooms) %>% 
+  mutate(percentage = n / sum(n))
+
+one_bedrooms <- 
+  bedrooms %>% 
+  filter(bedrooms == "1") %>% 
+  pull(percentage) %>% 
+  scales::percent(0.1)
+
+two_bedrooms <- 
+  bedrooms %>% 
+  filter(bedrooms == "2") %>% 
+  pull(percentage) %>% 
+  scales::percent(0.1)
+
+three_bedrooms <- 
+  bedrooms %>% 
+  filter(bedrooms == "3+") %>% 
+  pull(percentage) %>% 
+  scales::percent(0.1)
+
+studios <- 
+  bedrooms %>% 
+  filter(bedrooms == "0") %>% 
+  pull(percentage) %>% 
+  scales::percent(0.1)
+
+eh_3_bedroom <- 
+  property %>% 
+  filter(scraped >= "2021-01-01", listing_type == "Entire home/apt", !is.na(bedrooms)) %>% 
+  st_drop_geometry() %>% 
+  summarize(bed_3 = mean(bedrooms <= 3)) %>% 
+  pull(bed_3) %>% 
+  scales::percent(0.1)
+
+rm(property, daily, GH)
+
+```
+
+Table \@ref(tab:tab-2) provides the distribution of the listings by listing type in 2020. The majority of STRs in Ottawa are entire homes, a category which includes single-family homes, townhouses, apartments and condominiums. Half (`r one_bedrooms`) of these were one-bedroom housing units, and more than a quarter (`r two_bedrooms`) were two-bedrooms units. `r three_bedrooms` had three or more bedrooms, and `r studios` were studios. In general, studios and one-bedroom units are over-represented on STR platforms in comparison with the City’s overall housing stock.
+
+``` {r tab-2, include = TRUE}
+
+listing_type_breakdown %>%
+  mutate(active_listings = prettyNum(round(active_listings, digits = -1), ","),
+         revenue = scales::dollar(revenue, 0.1, 1 / 1000000),
+         pct_of_listings = scales::percent(pct_of_listings, 0.1),
+         pct_of_revenue = scales::percent(pct_of_revenue, 0.1),
+         pct_listing_growth = scales::percent(pct_listing_growth, 0.1)) %>% 
+  rename(`Listing type` = listing_type,
+         `Active listings` = active_listings,
+         `Annual revenue (million)` = revenue,
+         `Share of all listings` = pct_of_listings,
+         `Share of all revenue` = pct_of_revenue,
+         `Annual listing growth` = pct_listing_growth
+         ) %>% 
+  kbl(caption = "Listing type prevalence in the City of Ottawa",
+               align = "lrrrrr") %>% 
+  kable_styling(latex_options="scale_down")
+
+```
+
+In 2021 entire-home listings accounted for `r eh_listings` of all daily active listings, and `r eh_revenue` of total host revenue. (Private rooms accounted for nearly all of the remainder.) Moreover, the dominance of entire-home listings in Ottawa’s STR market has been increasing over time, and this segment of the market has held up better than either the private-room or shared-room segments during the Covid-19 pandemic.
+
+<br>
+
+## STR growth rates
+
+``` {r make_fig_3}
+
+figure_3_fun <- function() {
+
+  daily_variation %>%
+  mutate(label = if_else(date == "2017-06-15", var, NA_character_)) %>%
+  ggplot(aes(date, value, colour = var)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_line(lwd = 1, na.rm = TRUE) +
+  geom_label(aes(label = label), size = 3) +
+  scale_x_date(name = NULL) +
+  scale_y_continuous(name = NULL, limits = c(-1, NA),
+                     labels = scales::percent) +
+  scale_color_manual(name = NULL, values = col_palette[c(5, 1)]) +
+  theme_minimal() +
+  theme(legend.position = "none", panel.grid.minor.x = element_blank())
+
+}
+
+ggsave(here("output", "figures", "figure_3.pdf"), plot = figure_3_fun(),
+       width = 8, height = 5, units = "in", useDingbats = FALSE)
+
+```
+
+Until the end of 2019, the number of active STRs listings was steadily increasing in the City of Ottawa Figure \@ref(fig:growth_graph) shows the change in active listings and revenue relative to one year earlier, which is a convenient way to remove seasonal variation to identify underlying growth trends. The figure indicates that, through the beginning of 2018, both active listings and revenue were growing rapidly. From mid-2018 to late 2019, revenue continued to grow robustly, although with mostly stagnant listing numbers. The pandemic halted Ottawa's STR market growth, with active listings and revenue collapsing in March 2020, although revenue growth in particular has begun to recover as of late 2021..
+
+``` {r growth_graph, include = TRUE, fig.cap = '(ref:growth_graph)', fig.align = "center"}
+
+figure_3_fun()
+
+```
+
+(ref:growth_graph) _Change in daily active listings and host revenue compared to one year earlier (14-day average)_
+
+``` {r para_6, cache = TRUE, cache.lazy = FALSE}
+
+# YOY listing growth, 2016-2017
+listing_growth_2017 <-
+  daily %>%
+  filter(status != "B", year(date) %in% 2016:2017, date != "2016-02-29") %>%
+  group_by(year_2017 = year(date) == 2017) %>%
+  summarize(n = n() / 365) %>%
+  summarize(change = (n[2] - n[1]) / n[1]) %>%
+  pull(change) %>%
+  scales::percent(0.1)
+
+# YOY listing growth, 2017-2018
+listing_growth_2018 <-
+  daily %>%
+  filter(status != "B", year(date) %in% 2017:2018) %>%
+  group_by(year_2018 = year(date) == 2018) %>%  
+  summarize(n = n() / 365) %>%
+  summarize(change = (n[2] - n[1]) / n[1]) %>%
+  pull(change) %>%
+  scales::percent(0.1)
+
+#' YOY listing growth, 2018-2019
+listing_growth_2019 <-
+  daily %>%
+  filter(status != "B", year(date) %in% 2018:2019) %>%
+  group_by(year_2019 = year(date) == 2019) %>%
+  summarize(n = n() / 365) %>%
+  summarize(change = (n[2] - n[1]) / n[1])  %>%
+  pull(change) %>%
+  scales::percent(0.1)
+
+# YOY listing growth, 2019-2020
+listing_growth_2020 <-
+  daily %>%
+  filter(status != "B", year(date) %in% 2019:2020, date != "2020-02-29") %>%
+  group_by(year_2020 = year(date) == 2020) %>%  
+  summarize(n = n() / 365) %>%
+  summarize(change = (n[2] - n[1]) / n[1])  %>%
+  pull(change) %>%
+  scales::percent(0.1)
+
+# YOY listing growth, 2020-2021
+listing_growth_2021 <-
+  daily %>%
+  filter(status != "B", year(date) %in% 2020:2021, month(date) <= 10, 
+         date != "2020-02-29") %>%
+  group_by(year_2021 = year(date) == 2021) %>%  
+  summarize(n = n() / 304) %>%
+  summarize(change = (n[2] - n[1]) / n[1])  %>%
+  pull(change) %>%
+  scales::percent(0.1)
+
+
+```
+
+Overall, the year-over-year change in average active listings from 2016 to 2017  was `r listing_growth_2017`, the year-over-year change from 2017 to 2018 was `r listing_growth_2018`, and the year-over-year change from 2018 to 2019 was `r listing_growth_2019`. In 2020, because of the Covid-19 pandemic, the year-over-year change in active daily listings was `r listing_growth_2020`. 2021, meanwhile, has seen the beginnings of a recovery, with a year-over-year change of `r listing_growth_2021` in the first ten months of the year and a shift to positive growth in the last several months.
+
+```{r active_listings, cache = TRUE, cache.lazy = FALSE}
+
+
+# active_by_status <- 
+#   daily %>% 
+#   filter(housing, date >= "2016-01-01", status %in% c("R", "A")) %>% 
+#   count(date, status)
+# 
+# reserved_nights_increase_2019 <- 
+#   daily %>% 
+#   filter(housing, status == "R", date >= start_2019 - years(1), 
+#          date <= end_2019) %>% 
+#   count(date_2019 = date >= start_2019) %>% 
+#   summarize(growth = (n[2] - n[1]) / n[1]) %>% 
+#   pull(growth) %>% 
+#   scales::percent(0.1)
+# 
+# reserved_nights_decrease_2020 <- 
+#   daily %>% 
+#   filter(housing, status == "R", date >= start_2020 - years(1), 
+#          date <= end_2020) %>% 
+#   count(date_2019 = date >= start_2020) %>% 
+#   summarize(growth = (n[2] - n[1]) / n[1]) %>% 
+#   pull(growth) %>% 
+#   scales::percent(0.1)
+# 
+# reserved_nights_increase_jan_feb <- 
+#   daily %>% 
+#   filter(housing, status == "R", date >= start_2019, 
+#          month(date) %in% c(1, 2)) %>% 
+#   count(date_2020 = date >= start_2020) %>% 
+#   summarize(growth = (n[2] - n[1]) / n[1]) %>% 
+#   pull(growth) %>% 
+#   scales::percent(0.1)
+
+```
+
+```{r reservation_trend, cache = TRUE, cache.lazy = FALSE}
+
+library(tsibble)
+library(feasts)
+library(fable)
+
+# Get daily reservations and prices
+reservations_and_prices <- 
+  daily %>% 
+  filter(date >= "2017-08-01", status == "R") %>% 
+  group_by(date) %>% 
+  summarize(res = n(), price = mean(price))
+
+# Create monthly time series
+monthly_series <- 
+  reservations_and_prices %>% 
+  tsibble::as_tsibble(index = date) %>% 
+  tsibble::index_by(yearmon = yearmonth(date)) %>% 
+  summarize(price = sum(res * price) / sum(res),
+            res = sum(res)) %>% 
+  relocate(price, .after = res)
+
+# Create reservations model
+reservations_model <- 
+  monthly_series %>%
+  filter(yearmon <= yearmonth("2020-02")) %>% 
+  model(res = decomposition_model(
+    STL(res, robust = TRUE), NAIVE(season_adjust)))
+
+# Create price model
+price_model <- 
+  monthly_series %>% 
+  filter(yearmon <= yearmonth("2020-02")) %>% 
+  model(price = decomposition_model(
+    STL(price, robust = TRUE), NAIVE(season_adjust)))
+
+# Create reservations forecast
+reservations_forecast <-
+  reservations_model %>% 
+  forecast(h = "24 months") %>% 
+  as_tibble() %>% 
+  select(yearmon, res_trend_month = .mean)
+
+# Create price forecast
+price_forecast <- 
+  price_model %>% 
+  forecast(h = "24 months") %>% 
+  as_tibble() %>% 
+  select(yearmon, price_trend_month = .mean)
+
+# Integrate forecasts into monthly data
+monthly_series <- 
+  monthly_series %>% 
+  left_join(reservations_forecast, by = "yearmon") %>% 
+  left_join(price_forecast, by = "yearmon")
+
+# Integrate forecasts into daily data
+reservations_and_prices <- 
+  reservations_and_prices %>% 
+  mutate(across(c(res, price), slider::slide_dbl, ~.x[1], .before = 366, 
+                .complete = TRUE, .names = "{.col}_trend")) %>%
+  mutate(across(c(res_trend, price_trend), slider::slide_dbl, mean, 
+                .before = 6, .complete = TRUE)) %>%
+  mutate(across(c(res_trend, price_trend), 
+                ~if_else(date >= "2020-03-01", .x, NA_real_))) %>%
+  mutate(yearmon = yearmonth(date)) %>%
+  left_join(select(monthly_series, -res, -price), by = "yearmon") %>%
+  group_by(yearmon) %>%
+  mutate(res_trend = res_trend * res_trend_month / sum(res_trend),
+         price_trend = price_trend * price_trend_month / mean(price_trend)) %>%
+  ungroup() %>%
+  select(-c(yearmon:price_trend_month))
+
+res_total_pandemic_dif <-
+  reservations_and_prices |> 
+  filter(date >= "2020-03-01") |> 
+  summarize(res_dif = sum(res_trend - res)) |> 
+  pull(res_dif) |> 
+  scales::comma(100)
+
+res_total_pandemic <-
+  reservations_and_prices |> 
+  filter(date >= "2020-03-01") |> 
+  summarize(res_tot = sum(res)) |> 
+  pull(res_tot) |> 
+  scales::comma(100)
+
+res_total_pandemic_trend <-
+  reservations_and_prices |> 
+  filter(date >= "2020-03-01") |> 
+  summarize(res_tot = sum(res_trend)) |> 
+  pull(res_tot) |> 
+  scales::comma(100)
+
+res_total_pandemic_pct <-
+  {parse_number(res_total_pandemic) / parse_number(res_total_pandemic_trend)} %>%
+  scales::percent(0.1)
+
+price_difs <- 
+  reservations_and_prices |> 
+  mutate(price_dif = price - price_trend,
+         price_dif_pct = (price - price_trend) / price_trend) |> 
+  summarize(max_price = max(price, na.rm = TRUE),
+            max_dif = max(price_dif, na.rm = TRUE),
+            max_dif_pct = max(price_dif_pct, na.rm = TRUE),
+            max_price_date = date[which.max(price)],
+            max_dif_date = date[which.max(price_dif)],
+            max_dif_pct_date = date[which.max(price_dif_pct)])
+
+max_price <- scales::dollar(price_difs$max_price, 1)
+
+var_rise_price <-
+  daily |> 
+  filter(year(date) %in% c(2019, 2021),
+         month(date) <= month(max(daily$date))) |> 
+  group_by(year_2021 = year(date) == 2021) |> 
+  summarize(avg_price = mean(price)) |> 
+  summarize((avg_price[2] - avg_price[1]) / avg_price[1]) |> 
+  pull() |> 
+  scales::percent(0.1)
+ 
+rev_lost <- 
+  reservations_and_prices |> 
+  filter(date >= "2020-03-01") |> 
+  mutate(rev_lost = (res_trend * price_trend) - (res * price)) |> 
+  summarize(rev_tot = sum(rev_lost), rev_mean = mean(rev_lost))
+
+total_revenue_lost <- 
+  rev_lost$rev_tot |> 
+  scales::dollar(0.1, scale = 1 / 1000000, suffix = " million")
+
+mean_revenue_lost <- 
+  rev_lost$rev_mean |> 
+  scales::dollar(100)
+
+```
+
+``` {r make_fig_4}
+
+ figure_4_fun <- function(regular = "", condensed = "") {
+   
+   reservations_and_prices %>% 
+  mutate(res = slider::slide_dbl(res, mean, .before = 6, .complete = TRUE)) %>% 
+  select(date, res, res_trend) %>% 
+  pivot_longer(-date) %>% 
+  filter(!is.na(value)) %>%
+  mutate(label = case_when(
+    date == "2019-07-05" & name == "res" ~ "Actual reservations", 
+    date == "2020-08-05" & name == "res_trend" ~ "Expected reservations",
+    TRUE ~ NA_character_)) %>%
+  ggplot() +
+  geom_ribbon(aes(x = date, ymin = res, ymax = res_trend, group = 1),
+              data = {reservations_and_prices %>% 
+                  mutate(res = slider::slide_dbl(res, mean, .before = 6, .complete = TRUE))
+              }, fill = col_palette[3],
+              alpha = 0.3) +
+  geom_line(aes(date, value, color = name), lwd = 1) +
+  geom_label(aes(date, value, label = label, color = name), size = 3) +
+  scale_x_date(name = NULL, limits = as.Date(c("2018-01-01", NA))) +
+  scale_y_continuous(name = NULL, limits = c(0, NA), 
+                     label = scales::comma) +
+  scale_color_manual(name = NULL, 
+                     labels = c("Actual reservations", "Expected reservations"), 
+                     values = col_palette[c(5, 1)]) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        panel.grid.minor.x = element_blank())
+
+ }
+
+   ggsave(here("output", "figures", "figure_4.pdf"), plot = figure_4_fun(),
+          width = 8, height = 5, units = "in", useDingbats = FALSE)
+   
+
+```
+
+Figure \@ref(fig:res_trend) provides a closer look at daily reservations since 2018, comparing the actual trajectory of reservations during the pandemic with what the trajectory of reservations would have been expected to be, based on previous growth in Ottawa's STR market but in the absence of the pandemic. (To do this, we use seasonal decomposition to identify the regular seasonal fluctuations in STR activity and separate them from the underlying patterns of growth or decline.) The pattern is clear: reservations would have been expected to grow steadily over the last two years, but instead have plummeted to a fraction of that trend. In total, from March 2020 through October 2021, we estimate that there have been `r res_total_pandemic_dif` fewer STA nights reserved than would normally have been expected to occur. The `r res_total_pandemic` total nights reserved in this time period is only `r res_total_pandemic_pct` of the `r res_total_pandemic_trend` nights total that would represent the previous growth trend.
+
+``` {r fig-res_trend, include = TRUE, fig.cap = '(ref:res_trend)', fig.align = "center"}
+
+figure_4_fun()
+
+```
+
+(ref:fig-1-5) _Actual and expected reservations during the Covid-19 pandemic (7-day average)_
+
+Average nightly STR prices, meanwhile, have remained mostly stable during the pandemic. From January to October 2021, nightly prices have been `r var_rise_price` higher than during these same months of 2019. The result of stable prices and plunging reservations is that STR host revenue decreased by a staggering `r active_yoy_revenue` in 2021 compared to 2019. To offer some perspective, from 2018 to 2019, STR revenue increased by `r active_yoy_revenue19`. When the slightly higher prices on reservations which did occur is combined with the reservations which did not occur, our estimate is that Ottawa’s STR hosts lost a total of `r total_revenue_lost` in revenue between March 2020 and October 2020 because of the Covid-19 pandemic—an average of `r mean_revenue_lost` per day.
+
+<br>
+
+
+## Revenue distribution among STR hosts
+
+``` {r para_9, cache = TRUE, cache.lazy = FALSE}
+
+# Host deciles table for figure
+host_deciles <-
+  daily %>%
+  filter(year(date) == 2021, status == "R", !is.na(host_ID)) %>%
+  group_by(host_ID) %>%
+  summarize(rev = sum(price)) %>%
+  summarize(all = sum(rev),
+            top_10 = sum(rev[rev > quantile(rev, c(0.90))] / all),
+            top_20 = sum(rev[rev > quantile(rev, c(0.80))] / all) -
+              sum(rev[rev > quantile(rev, c(0.90))] / all),
+            top_30 = sum(rev[rev > quantile(rev, c(0.70))] / all) -
+              sum(rev[rev > quantile(rev, c(0.80))] / all),
+            top_40 = sum(rev[rev > quantile(rev, c(0.60))] / all) -
+              sum(rev[rev > quantile(rev, c(0.70))] / all),
+            top_50 = sum(rev[rev > quantile(rev, c(0.50))] / all) -
+              sum(rev[rev > quantile(rev, c(0.60))] / all),
+            top_60 = sum(rev[rev > quantile(rev, c(0.40))] / all) -
+              sum(rev[rev > quantile(rev, c(0.50))] / all),
+            top_70 = sum(rev[rev > quantile(rev, c(0.30))] / all) -
+              sum(rev[rev > quantile(rev, c(0.40))] / all),
+            top_80 = sum(rev[rev > quantile(rev, c(0.20))] / all) -
+              sum(rev[rev > quantile(rev, c(0.30))] / all),
+            top_90 = sum(rev[rev > quantile(rev, c(0.10))] / all) -
+              sum(rev[rev > quantile(rev, c(0.20))] / all),
+            top_100 = sum(rev[rev > quantile(rev, c(0.00))] / all) -
+              sum(rev[rev > quantile(rev, c(0.10))] / all)) %>%
+  select(-all) %>%
+  pivot_longer(everything(), names_to = "percentile", values_to = "value") %>%
+  mutate(percentile = factor(percentile, levels = paste0("top_", 1:10 * 10))) %>%
+  mutate(perfect_distribution = 0.1,
+         decile = 1:10,
+         dummy_1 = perfect_distribution,
+         dummy_2 = value) %>%
+  rename("0" = perfect_distribution, "1" = value, "0.25" = dummy_1,
+         "0.75" = dummy_2) %>%
+  pivot_longer(c("0","0.25", "0.75", "1"), names_to = "position") %>%
+  mutate(position = as.numeric(position),
+         display_val = scales::percent(value, .1)) %>%
+  group_by(position) %>%
+  mutate(absolute_val = slide_dbl(value, ~{.x[1] / 2 + sum(.x[-1])},
+                                  .after = 9)) %>%
+  ungroup() %>%
+  mutate(
+    display_val = paste0("earned ", display_val, "\nof revenue"),
+    display_percentile = case_when(
+      percentile == "top_10" ~ "Top 10% of hosts...",
+      percentile == "top_20" ~ "Next 10% of hosts...",
+      TRUE ~ NA_character_))
+
+top_host_listings <-
+  property %>%
+  filter(host_ID == host_rev[which.max(host_rev$rev),]$host_ID) %>%
+  nrow()
+
+top_host_rev <-
+  host_rev %>%
+  filter(rev == max(rev)) %>%
+  pull(rev) %>%
+  scales::dollar(accuracy = 0.1, scale = 1 / 1000000, suffix = " million")
+
+median_host_rev <-
+  median(host_rev$rev) %>%
+  scales::dollar(accuracy = 100)
+
+n_hosts_over_100 <-
+  host_rev %>%
+  filter(rev >= 100000) %>%
+  nrow()
+
+host_rev_top_10 <-
+  host_rev %>%
+  summarize(top_10 = sum(rev[rev > quantile(rev, .9)]) / sum(rev)) %>%
+  pull(top_10) %>%
+  scales::percent(0.1)
+
+host_rev_top_5 <-
+  host_rev %>%
+  summarize(top_5 = sum(rev[rev > quantile(rev, .95)]) / sum(rev)) %>%
+  pull(top_5) %>%
+  scales::percent(0.1)
+
+host_rev_top_1 <-
+  host_rev %>%
+  summarize(top_1 = sum(rev[rev > quantile(rev, .99)]) / sum(rev)) %>%
+  pull(top_1) %>%
+  scales::percent(0.1)
+
+#### same for 2019
+
+host_deciles19 <-
+  daily %>%
+  filter(year(date) == 2019, status == "R", !is.na(host_ID)) %>%
+  group_by(host_ID) %>%
+  summarize(rev = sum(price)) %>%
+  summarize(all = sum(rev),
+            top_10 = sum(rev[rev > quantile(rev, c(0.90))] / all),
+            top_20 = sum(rev[rev > quantile(rev, c(0.80))] / all) -
+              sum(rev[rev > quantile(rev, c(0.90))] / all),
+            top_30 = sum(rev[rev > quantile(rev, c(0.70))] / all) -
+              sum(rev[rev > quantile(rev, c(0.80))] / all),
+            top_40 = sum(rev[rev > quantile(rev, c(0.60))] / all) -
+              sum(rev[rev > quantile(rev, c(0.70))] / all),
+            top_50 = sum(rev[rev > quantile(rev, c(0.50))] / all) -
+              sum(rev[rev > quantile(rev, c(0.60))] / all),
+            top_60 = sum(rev[rev > quantile(rev, c(0.40))] / all) -
+              sum(rev[rev > quantile(rev, c(0.50))] / all),
+            top_70 = sum(rev[rev > quantile(rev, c(0.30))] / all) -
+              sum(rev[rev > quantile(rev, c(0.40))] / all),
+            top_80 = sum(rev[rev > quantile(rev, c(0.20))] / all) -
+              sum(rev[rev > quantile(rev, c(0.30))] / all),
+            top_90 = sum(rev[rev > quantile(rev, c(0.10))] / all) -
+              sum(rev[rev > quantile(rev, c(0.20))] / all),
+            top_100 = sum(rev[rev > quantile(rev, c(0.00))] / all) -
+              sum(rev[rev > quantile(rev, c(0.10))] / all)) %>%
+  select(-all) %>%
+  pivot_longer(everything(), names_to = "percentile", values_to = "value") %>%
+  mutate(percentile = factor(percentile, levels = paste0("top_", 1:10 * 10))) %>%
+  mutate(perfect_distribution = 0.1,
+         decile = 1:10,
+         dummy_1 = perfect_distribution,
+         dummy_2 = value) %>%
+  rename("0" = perfect_distribution, "1" = value, "0.25" = dummy_1,
+         "0.75" = dummy_2) %>%
+  pivot_longer(c("0","0.25", "0.75", "1"), names_to = "position") %>%
+  mutate(position = as.numeric(position),
+         display_val = scales::percent(value, .1)) %>%
+  group_by(position) %>%
+  mutate(absolute_val = slide_dbl(value, ~{.x[1] / 2 + sum(.x[-1])},
+                                  .after = 9)) %>%
+  ungroup() %>%
+  mutate(
+    display_val = paste0("earned ", display_val, "\nof revenue"),
+    display_percentile = case_when(
+      percentile == "top_10" ~ "Top 10% of hosts...",
+      percentile == "top_20" ~ "Next 10% of hosts...",
+      TRUE ~ NA_character_))
+
+top_host_listings19 <-
+  property %>%
+  filter(host_ID == host_rev[which.max(host_rev19$rev),]$host_ID) %>%
+  nrow()
+
+top_host_rev19 <-
+  host_rev19 %>%
+  filter(rev == max(rev)) %>%
+  pull(rev) %>%
+  scales::dollar(accuracy = 0.1, scale = 1 / 1000000, suffix = " million")
+
+median_host_rev19 <-
+  median(host_rev19$rev) %>%
+  scales::dollar(accuracy = 100)
+
+n_hosts_over_100_19 <-
+  host_rev19 %>%
+  filter(rev >= 100000) %>%
+  nrow()
+
+host_rev_top_10_19 <-
+  host_rev19 %>%
+  summarize(top_10 = sum(rev[rev > quantile(rev, .9)]) / sum(rev)) %>%
+  pull(top_10) %>%
+  scales::percent(0.1)
+
+host_rev_top_5_19 <-
+  host_rev19 %>%
+  summarize(top_5 = sum(rev[rev > quantile(rev, .95)]) / sum(rev)) %>%
+  pull(top_5) %>%
+  scales::percent(0.1)
+
+host_rev_top_1_19 <-
+  host_rev19 %>%
+  summarize(top_1 = sum(rev[rev > quantile(rev, .99)]) / sum(rev)) %>%
+  pull(top_1) %>%
+  scales::percent(0.1)
+
+diff_host_100 <-
+  n_hosts_over_100_19 - n_hosts_over_100
+ 
+```
+
+``` {r make_fig_5}
+
+figure_5_fun <- function() {
+
+  revenue_colour <- colorRampPalette(col_palette[c(2, 1, 4, 6, 3, 5)])(10)
+
+  host_deciles %>%
+  ggplot(aes(position, value, group = decile, fill = decile)) +
+  geom_area(colour = "white", lwd = 1.2) +
+  geom_text(aes(x = 0.02, y = absolute_val, label = display_percentile),
+            data = filter(host_deciles, position == 0, decile <= 2),
+            hjust = 0) +
+  geom_text(aes(x = 0.98, y = absolute_val, label = display_val),
+            data = filter(host_deciles, position == 1, decile <= 2),
+            hjust = 1) +
+  scale_y_continuous(name = "Host decile", label = scales::label_percent(1),
+                     breaks = seq(0, 1, by = 0.1), limits = c(0, 1),
+                     sec.axis = sec_axis(~.,
+                                         name = "% of total revenue",
+                                         labels = derive(),
+                                         breaks = derive())) +
+  scale_fill_gradientn(colours = revenue_colour) +
+  theme_void() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(hjust = 1),
+        axis.title.y.left = element_text(
+          angle = 90, margin = margin(0, 10, 0, 0)),
+        axis.title.y.right = element_text(
+          angle = 270, margin = margin(0, 0, 0, 10)),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+}
+
+
+  ggsave(here("output", "figures", "figure_5.pdf"), plot = figure_5_fun(),
+         width = 8, height = 5, units = "in", useDingbats = FALSE)
+
+```
+
+A crucial concept for understanding the structure of an STR market is the distinction between casual STRs (“home sharing”) and dedicated STRs (“commercial operations”). One way to capture this distinction is to examine the distribution of revenue among STR hosts. Is revenue widely distributed between many part-time hosts of single listings, or concentrated among a small number of commercial operators who control many full-time listings? Among all the STR hosts who earned revenue in the City of Ottawa in 2021, the median revenue was `r median_host_rev`. Throughout the City of Ottawa, there were `r n_hosts_over_100` hosts that earned more than $100,000 in 2021, which is `r diff_host_100` fewer hosts than in 2019. Figure \@ref(fig:host_rev) shows the percentage of the total `r annual_rev` in STR revenue which accrued to each decile of hosts. The figure shows that revenue is disproportionately concentrated among a small number of hosts; the top 10% earned `r host_rev_top_10`: the top 5% earned `r host_rev_top_5` of revenue, while the top 1% of hosts earned `r host_rev_top_1` of all revenue. To put this revenue distribution in context, Montreal’s top 10% of STR hosts earned 68.8% of all revenue in 2019. On the other hand, Vancouver's top 10% hosts only earned 43.2% of all revenue in 2019.
+
+``` {r rev_host, include = TRUE, fig.cap = '(ref:rev_host)', fig.align = "center"}
+
+figure_5_fun()
+
+```
+
+(ref:rev_host) _STR host revenue distribution in the City of Ottawa_
+
+<br>
+
+## The commercialization of Ottawa’s STR market
+
+Some hosts operate multiple STR units, which strongly suggests that they are commercial operators rather than a casual home sharers. To take the simplest case, a host with two or more entire-home listings on the same day cannot be operating both listings out of their principal residence. We consider entire-homes to be "multilistings" if they are operated by hosts who are simultaneously operating other entire-home listings. We define private-room multilistings as cases where a host has three or more private-room listings operating on the same day. Since `r eh_3_bedroom` of entire-home listings have three or fewer bedrooms, there will be extremely few cases where a host operating three private-room STR listings in a dwelling unit has not converted the entire unit into a dedicated STR.
+
+``` {r para_10, cache = TRUE, cache.lazy = FALSE}
+
+# ML table for figure
+ML <-
+  daily %>%
+  filter(status != "B") %>%
+  group_by(date) %>%
+  summarize(Listings = mean(multi),
+            Revenue = sum(price[status == "R" & multi], na.rm = TRUE) /
+              sum(price[status == "R"], na.rm = TRUE)) %>%
+  mutate(across(where(is.numeric), slide_dbl, mean, .before = 7, .after = 6)) %>%
+  pivot_longer(c(Listings, Revenue), names_to = "Multilisting percentage",
+               values_to = "value")
+
+```
+
+``` {r make_fig_6}
+
+figure_6_fun <- function() {
+
+  ML %>%
+    filter(date >= "2017-01-01") %>%
+    mutate(label = if_else(date == "2018-01-01", `Multilisting percentage`,
+                           NA_character_)) %>%
+    ggplot() +
+    geom_line(aes(date, value, colour = `Multilisting percentage`), lwd = 1) +
+    geom_label(aes(date, value, label = label, 
+                   colour = `Multilisting percentage`), size = 3) +
+    scale_x_date(name = NULL) +
+    scale_y_continuous(name = NULL,
+                       label = scales::percent_format(accuracy = 1)) +
+    scale_colour_manual(values = col_palette[c(5, 1)]) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          panel.grid.minor.x = element_blank())
+
+}
+ 
+  ggsave(here("output", "figures", "figure_6.pdf"), plot = figure_6_fun(),
+         width = 8, height = 5, units = "in", useDingbats = FALSE)
+
+```
+
+In 2021, `r ml_listings` of active listings in Ottawa are multilistings, earning `r ml_revenue` of total host revenue. Multilistings have been growing steadily since 2017, both in terms of listings and revenue percentage, and the Covid-19 pandemic has not had a meaningful impact on this growth (Figure \@ref(fig:ml_graph)). These figures should be taken as highly conservative estimates. Many commercial operators will use different Airbnb or Vrbo accounts to manage their listings. Moreover, many STR commercial operators only operate a single listing, but operate it on a full-time basis. A house owner with a secondary suite, or the owner of an investment condo who operates a STR in it, are clearly commercial operators running listings which are not their principal residences, but they would not be counted by this method.
+
+``` {r ml_graph, include = TRUE, fig.cap = '(ref:ml_graph)', fig.align = "center"}
+
+figure_6_fun()
+
+```
+
+(ref:ml_graph) _The percentage of active listings and revenue accounted for by multilistings in Ottawa (14-day average)_
+
+<br>
+
+
+## STR-induced housing loss
+
+Ottawa’s housing market has been under considerable stress in the past years, with housing prices and rents rising, and rental vacancy rates falling. These are symptoms of a market where the supply of housing is insufficient to meet demand. One possible explanation for both the insufficient supply and elevated demand for housing in Ottawa is the growth in short-term rentals. Tourists are now able to compete with residents for housing—adding demand to the local housing market—while landlords are now able to shift their properties out of the conventional housing market to become dedicated STRs—reducing the supply of conventional housing. Research has found that renting a housing unit on the STR market frequently offers landlords greater potential revenue than conventional leases (Wachsmuth & Weisler 2018), especially in transit-accessible neighborhoods (Deboosere et al. 2019). Multiple studies have also found that Airbnb and other STR platforms increase housing costs (Barron, Kung, & Proserpio 2017; Horn & Merante 2017; Garcia-Lopez et al. 2019).
+
+One of the major considerations when gauging the impacts of short-term rentals (STRs) on a city, therefore, is the extent to which STRs are removing long-term housing from the market. This process can occur either directly, where tenants of a unit are evicted or not replaced at the end of a lease and the unit is converted to a STR, or indirectly by absorbing new construction or investment properties which otherwise would have gone onto the long-term market. To obtain the exact number of units that have been occupied as STRs, landlords or units would need to be individually surveyed, which is infeasible because STR hosts are mostly anonymous on major STR platforms such as Airbnb and VRBO. Instead, we use the daily activity of listings, alongside structural characteristics such as listing type and location, to estimate which listings are operating as dedicated STRs and are therefore not available as conventional long-term housing.
+
+_Frequently Rented Entire-Home (FREH) listings:_ The number of frequently-rented units is one way to estimate STR-induced housing loss. If a STR is available for reservations the majority of the year and receives many bookings, it is reasonable to assume that it is not serving as an individual’s principal residence at the same time. Along these lines, we define frequently rented entire-home (FREH) listings as entire-home listings which were available on Airbnb or VRBO the majority of the year (at least 183 nights) and were booked a minimum of 90 nights. We then apply a statistical model (described in the appendix) to the FREH data in order to generate an estimate of FREH activity based on three months of listing activity. This allows us to detect listings which are operating in a full-time manner but have not yet been listed for an entire year, and allows us to account for relatively short-term changes in market conditions.
+
+_Ghost hostels:_ In addition to FREH listings, it is possible that entire housing units have been subdivided into multiple private-room listings, each of which appearing to be a spare bedroom or the like, while actually collectively representing an apartment removed from the long-term housing market. We call these clusters of private-room listings “ghost hostels”, building on the advocacy group Fairbnb.ca’s term “ghost hotels”—multiple FREH listings located in a single building, collectively serving as de facto hotels instead of long-term housing (Wieditz 2017). We detect ghost hostels by finding clusters of three or more private-room listings operated by a single host, whose reported locations are close enough to each other that they are likely to have originated in the same actual housing unit. (Airbnb and VRBO obfuscate listing locations by shifting them randomly up to 200 m.)
+
+
+```{r housing_loss, cache = TRUE, cache.lazy = FALSE}
+
+FREH <- 
+  daily %>% 
+  filter(date >= "2016-01-01") %>% 
+  group_by(date) %>% 
+  summarize(FREH_3 = sum(FREH_3)) %>%
+  filter(substr(date, 9, 10) == "01")
+
+# FREH in 2021-10
+FREH_2021 <- 
+  FREH %>% 
+  filter(date == "2021-10-01") %>% 
+  pull(FREH_3) %>% 
+  scales::comma(10)
+
+# GH in 2021-10
+GH_2021 <- 
+  GH %>% 
+  filter(date == "2021-10-01") %>% 
+  pull(housing_units) %>% 
+  sum() %>% 
+  scales::comma(10)
+
+# Total housing loss for 2021
+housing_loss_2021 <- 
+  {{FREH %>% 
+      filter(date == "2021-10-01") %>% 
+      pull(FREH_3)} +
+    {GH %>% 
+        filter(date == "2021-10-01") %>% 
+        pull(housing_units) %>% 
+        sum()}} %>% 
+  scales::comma(10)
+
+# Total housing loss for 2019
+housing_loss_2019 <- 
+  {{FREH %>% 
+      filter(date == "2019-10-01") %>% 
+      pull(FREH_3)} +
+      {GH %>% 
+          filter(date == "2019-10-01") %>% 
+          pull(housing_units) %>% sum()}} %>% 
+  scales::comma(10)
+
+FREH_total <- 
+  daily %>% 
+  filter(date >= "2016-01-01") %>% 
+  group_by(date) %>% 
+  summarize(FREH_3 = sum(FREH_3)) %>%
+  filter(substr(date, 9, 10) == "01")
+
+GH_total <-
+  GH %>%
+  st_drop_geometry() %>%
+  filter(status != "B") %>% 
+  group_by(date) %>%
+  summarize(GH = sum(housing_units)) %>%
+  mutate(GH = slide_dbl(GH, mean, .before = 29))
+
+housing_loss <-
+  FREH_total %>%
+  select(date, FREH_3) %>% 
+  left_join(GH_total, by = "date") %>%
+  rename(`Entire home/apt` = FREH_3, `Private room` = GH) %>%
+  pivot_longer(c(`Entire home/apt`, `Private room`), 
+               names_to = "Listing type",
+               values_to = "Housing units") %>% 
+  mutate(`Listing type` = factor(`Listing type`, 
+                                 levels = c("Private room", "Entire home/apt")))  
+
+# YOY increase in housing loss
+housing_loss_change <- 
+  {{{FREH %>% filter(date == as.Date("2021-10-01")) %>% pull(FREH_3)} +
+      {GH %>% filter(date == as.Date("2021-10-01")) %>% pull(housing_units) %>% sum()}} /
+      {{FREH %>% filter(date == as.Date("2019-10-01")) %>% pull(FREH_3)} +
+          {GH %>% filter(date == as.Date("2019-10-01") - years(1)) %>% 
+              pull(housing_units) %>% sum()}}} %>% 
+  {. - 1} %>% 
+  {. * -1} %>% 
+  scales::percent(0.1)
+
+FREH_nbhd <- 
+  daily %>% 
+  filter(date %in% as.Date(c("2019-10-01", "2021-10-01"))) %>% 
+  group_by(nbhd, date) %>% 
+  summarize(FREH = sum(FREH_3)) %>% 
+  mutate(date = year(date))
+
+FREH_DA <- 
+  daily %>% 
+  filter(date == "2021-10-01") %>% 
+  left_join(select(st_drop_geometry(property), property_ID, GeoUID)) %>% 
+  group_by(GeoUID) %>% 
+  summarize(FREH = sum(FREH_3))
+
+GH_nbhd <- 
+  GH %>% 
+  filter(date %in% as.Date(c("2019-10-01", "2020-10-01"))) %>% 
+  mutate(geometry = st_centroid(geometry)) %>% 
+  st_join(nbhd) %>% 
+  st_drop_geometry() %>% 
+  group_by(nbhd, date) %>% 
+  summarize(GH = sum(housing_units, na.rm = TRUE)) %>% 
+  as_tibble() %>% 
+  mutate(date = year(date))
+
+GH_DA <- 
+  GH %>% 
+  filter(date == "2021-10-01") %>% 
+  mutate(geometry = st_centroid(geometry)) %>% 
+  st_join(DA) %>% 
+  st_drop_geometry() %>% 
+  group_by(GeoUID) %>% 
+  summarize(GH = sum(housing_units, na.rm = TRUE)) %>% 
+  as_tibble()
+
+housing_loss_nbhd <- 
+  nbhd %>% 
+  left_join(FREH_nbhd) %>% 
+  left_join(GH_nbhd) %>% 
+  mutate(GH = if_else(is.na(GH), 0L, GH),
+         housing_loss_pct = (FREH + GH) / dwellings)
+
+housing_loss_DA <- 
+  DA %>% 
+  left_join(FREH_DA) %>% 
+  left_join(GH_DA) %>% 
+  mutate(GH = if_else(is.na(GH), 0L, GH),
+         housing_loss_pct = (FREH + GH) / dwellings)
+
+nbhd_housing_table <- 
+  nbhd %>% 
+  st_drop_geometry() %>% 
+  left_join(FREH_nbhd) %>% 
+  left_join(GH_nbhd) %>%
+  mutate(GH = if_else(is.na(GH), 0L, GH)) %>% 
+  group_by(nbhd) %>% 
+  summarize(
+    dwellings = mean(dwellings),
+    housing_loss_2019 = sum(FREH[date == 2019]) + sum(GH[date == 2019]),
+    housing_loss_2021 = sum(FREH[date == 2021]) + sum(GH[date == 2021]),
+    yoy_change = (housing_loss_2021 - housing_loss_2019) / housing_loss_2019,
+    housing_loss_pct_2021 = housing_loss_2021 / dwellings)
+
+```
+
+``` {r make_fig_7}
+
+figure_7_fun <- function() {
+  
+housing_loss %>% 
+  ggplot(aes(date, `Housing units`, fill = `Listing type`)) +
+  geom_col(lwd = 0) +
+  scale_fill_manual(values = col_palette[c(2, 4)]) +
+  scale_x_date(name = NULL, limits = c(as.Date("2016-10-01"), NA)) +
+  scale_y_continuous(name = NULL, label = scales::comma) +
+  theme_minimal() +
+  theme(legend.position = "bottom", 
+        panel.grid.minor.x = element_blank())
+  
+}
+
+ggsave(here("output", "figures", "figure_7.pdf"), plot = figure_7_fun(), 
+       width = 8, height = 5, units = "in", useDingbats = FALSE)
+
+```
+
+At the end of 2021, there were `r FREH_2021` FREH listings in the City of Ottawa, and `r GH_2021` more housing units which were operating as ghost hostels. In total, therefore, short-term rentals were taking `r housing_loss_2021` housing units off of Ottawa’s long-term market at the end of the year (Figure \@ref(fig:housing_loss)). This is a decline of `r housing_loss_change` compared to the same time in 2019 (a somewhat smaller decline than the equivalent `r active_yoy_listings` decline in active daily listings). Prior to the pandemic, there were more than 1,200 housing units operating as dedicated STRs in Ottawa.
+
+``` {r fig-7, include = TRUE, fig.cap = '(ref:housing_loss)', fig.align = "center"}
+
+figure_7_fun()
+
+```
+
+(ref:fig-7) _Housing units converted to dedicated STRs in the City of Ottawa (monthly average)_
+
+```{r housing_loss_2, cache = TRUE, cache.lazy = FALSE}
+
+# End-of-year summaries
+housing_loss_summaries <- 
+  daily %>% 
+  filter(status != "B", listing_type %in% c("Entire home/apt", "Private room")) %>% 
+  group_by(date) %>% 
+  summarize(eh = mean(FREH_3[listing_type == "Entire home/apt"] > 0.5),
+            pr = mean(GH[listing_type == "Private room"])) %>% 
+  mutate(across(c(eh, pr), slide_dbl, mean, .before = 30)) %>% 
+  filter(date %in% as.Date(c("2016-10-31", "2019-10-31", "2021-10-31")))
+
+eh_housing_loss <- 
+  housing_loss_summaries %>% 
+  filter(date == "2021-10-31") %>% 
+  pull(eh) %>% 
+  scales::percent(0.1)
+
+pr_housing_loss <- 
+  housing_loss_summaries %>% 
+  filter(date == "2021-10-31") %>% 
+  pull(pr) %>% 
+  scales::percent(0.1)
+
+eh_housing_loss_2019 <- 
+  housing_loss_summaries %>% 
+  filter(date == "2019-10-31") %>% 
+  pull(eh) %>% 
+  scales::percent(0.1)
+
+pr_housing_loss_2019 <- 
+  housing_loss_summaries %>% 
+  filter(date == "2019-10-31") %>% 
+  pull(pr) %>% 
+  scales::percent(0.1)
+
+eh_housing_loss_2016 <- 
+  housing_loss_summaries %>% 
+  filter(date == "2016-10-31") %>% 
+  pull(eh) %>%
+  scales::percent(0.1)
+
+pr_housing_loss_2016 <- 
+  housing_loss_summaries %>% 
+  filter(date == "2016-10-31") %>% 
+  pull(pr) %>% 
+  scales::percent(0.1)
+
+# Table for figure
+housing_loss_share <- 
+  daily %>% 
+  filter(status != "B", listing_type %in% c("Entire home/apt", "Private room")) %>% 
+  group_by(date) %>% 
+  summarize(
+    `Entire home/apt` = mean(FREH_3[listing_type == "Entire home/apt"] > 0.5),
+    `Private room` = mean(GH[listing_type == "Private room"])) %>% 
+  filter(date >= "2016-10-01") %>% 
+  pivot_longer(-date, names_to = "Listing type", 
+               values_to = "housing_loss_pct") %>% 
+  group_by(`Listing type`) %>% 
+  mutate(housing_loss_pct = slide_dbl(housing_loss_pct, mean, .before = 7, .after = 6))
+
+housing_loss_pct_dwelling <- 
+  {{{FREH %>% filter(date == "2021-10-01") %>% pull(FREH_3)} +
+      {GH %>% filter(date == "2021-10-01") %>% pull(housing_units) %>% sum()}} /
+      sum(nbhd$dwellings)} %>% 
+  scales::percent(0.1)
+
+housing_loss_pct_byward_2019 <- 
+  nbhd %>% 
+  left_join(FREH_nbhd) %>% 
+  left_join(GH_nbhd) %>% 
+  filter(date == "2019") %>% 
+  mutate(GH = if_else(is.na(GH), 0L, GH),
+         housing_loss_per_dwelling = (FREH + GH) / dwellings,
+         housing_loss_per_dwelling = round(housing_loss_per_dwelling, 3)) %>% 
+  st_drop_geometry() %>% 
+  filter(nbhd == "Byward Market") %>% 
+    pull(housing_loss_per_dwelling) %>% 
+  scales::percent(0.1)
+
+housing_loss_pct_nbhd <- 
+  nbhd %>% 
+  left_join(FREH_nbhd) %>% 
+  left_join(GH_nbhd) %>% 
+  filter(date == 2021) %>% 
+  mutate(GH = if_else(is.na(GH), 0L, GH),
+         housing_loss_per_dwelling = (FREH + GH) / dwellings,
+         housing_loss_per_dwelling = round(housing_loss_per_dwelling, 3)) %>% 
+  st_drop_geometry()
+
+housing_loss_pct_byward <- 
+  housing_loss_pct_nbhd %>% 
+  filter(nbhd == "Byward Market") %>% 
+  pull(housing_loss_per_dwelling) %>% 
+  scales::percent(0.1)
+
+housing_loss_pct_lowertown <- 
+  housing_loss_pct_nbhd %>% 
+  filter(nbhd == "Lowertown") %>% 
+  pull(housing_loss_per_dwelling) %>% 
+  scales::percent(0.1)
+
+
+
+```
+
+``` {r make_fig_8}
+
+figure_8_fun <- function() {
+  
+  housing_loss_share %>% 
+    mutate(label = if_else(date == "2018-01-01", `Listing type`, NA_character_)) %>%
+    ggplot(aes(date, housing_loss_pct, colour = `Listing type`)) +
+    geom_line(lwd = 1) +
+    geom_label(aes(label = label), size = 3) +
+    scale_x_date(name=NULL) +
+    scale_y_continuous(name = NULL, labels = scales::percent) +
+    scale_colour_manual(values = col_palette[c(5, 1)]) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          panel.grid.minor.x = element_blank())
+  
+}
+
+ggsave(here("output", "figures", "figure_8.pdf"), plot = figure_8_fun(), 
+       width = 8, height = 5, units = "in", useDingbats = FALSE)
+
+```
+
+In 2019, two thirds of entire-home listings (`r eh_housing_loss_2019`) and one third (`r pr_housing_loss_2019`) of the private-room listings were taking housing off the long-term market. The share of entire-home listings operating as dedicated STRs plummeted in the first year of pandemic—dropping below 40%—but has since been recovering quickly. At the end of 2021, `r eh_housing_loss` of entire-home listings and `r pr_housing_loss` of private-room listings were being operated in a full-time or close-to-full-time fashion (Figure \@ref(fig:housing_loss_share)).
+
+``` {r fig-8, include = TRUE, fig.cap = '(ref:housing_loss_share)', fig.align = "center"}
+
+figure_8_fun()
+
+```
+
+(ref:housing_loss_share) _The percentage of active STR listings contributing to housing loss each day in Ottawa (14-day average)_
+
+``` {r tab-2-1, include = TRUE}
+
+nbhd_housing_table %>% 
+  summarize(
+    dwellings = sum(dwellings, na.rm = TRUE),
+    housing_loss_2019 = sum(housing_loss_2019, na.rm = TRUE),
+    housing_loss_2021 = sum(housing_loss_2021, na.rm = TRUE),
+    yoy_change = (housing_loss_2021 - housing_loss_2019) / housing_loss_2019,
+    housing_loss_pct_2021 = housing_loss_2021 / dwellings) %>% 
+  mutate(nbhd = "City of Ottawa") %>% 
+  bind_rows(nbhd_housing_table) %>% 
+  relocate(nbhd) %>% 
+  select(-dwellings) %>% 
+  filter(housing_loss_2021 > 10) %>% 
+  arrange(desc(housing_loss_2021)) %>%
+  mutate(across(c(housing_loss_2019, housing_loss_2021), scales::comma, 10)) %>% 
+  mutate(across(c(yoy_change, housing_loss_pct_2021), scales::percent, 0.1)) %>% 
+  rename(Neighbourhood = nbhd,
+         `Housing loss (2021)` = housing_loss_2021,
+         `Housing loss (2019)` = housing_loss_2019,
+         `Change 2019-2021 (%)` = yoy_change,
+         `% of housing lost (2021)` = housing_loss_pct_2021) %>% 
+  kbl(caption = paste0("STR-induced housing loss by ward in the City ", 
+                       "of Ottawa (for wards with at least 10 housing ",
+                       "units lost in 2021)"),
+      align = "lrrrr") %>%
+  kable_styling(latex_options = "scale_down") %>%
+  row_spec(1, background = paste0(col_palette[2], "50"))
+
+```
+
+
+``` {r make_fig_9}
+
+figure_9_fun <- function() {
+  
+  left_map <-
+  housing_loss_DA %>%
+  ggplot() +
+  geom_sf(aes(fill = housing_loss_pct), colour = "transparent") +
+  scale_fill_stepsn(colors = col_palette[c(4, 3, 5)],
+                       na.value = "grey80", n.breaks = 6,
+                       limits = c(0, 0.015), oob = scales::squish,
+                       labels = scales::percent_format(0.1))  +
+  guides(fill = guide_colourbar(title = "STRs/\ndwelling",
+                                title.vjust = 1)) +
+  gg_bbox(active_DA) +
+  theme_void() +
+  theme(text = element_text(face = "plain"),
+        legend.title = element_text(face = "bold", size = 7),
+        legend.title.align = 0.9,
+        legend.text = element_text(size = 5),
+        panel.background = element_rect(fill = "grey40", colour = NULL))
+
+right_map <-
+  housing_loss_DA %>%
+  ggplot() +
+  geom_sf(aes(fill = housing_loss_pct), colour = "transparent") +
+  geom_sf(data = streets, colour = "white", alpha = 0.5) +
+  scale_fill_stepsn(colors = col_palette[c(4, 3, 5)],
+                       na.value = "grey80", n.breaks = 6,
+                       limits = c(0, 0.015), oob = scales::squish,
+                       labels = scales::percent_format(0.1))  +
+  guides(fill = guide_colourbar(title = "STRs/\ndwelling",
+                                title.vjust = 1)) +
+  coord_sf(xlim = st_bbox(active_DA)[c(1, 3)] * c(1.051, 0.972),
+           ylim = st_bbox(active_DA)[c(2, 4)] * c(1.0115, 0.996)) +
+  theme_void() +
+  theme(text = element_text(face = "plain"),
+        legend.title = element_text(face = "bold", size = 7),
+        legend.title.align = 0.9,
+        legend.text = element_text(size = 5),
+        panel.background = element_rect(fill = "grey40", colour = NULL))
+
+left_map + right_map + plot_layout(guide = "collect") &
+  theme(legend.position = "bottom", legend.key.width = unit(1.8, "lines"))
+
+}
+
+ggsave(here("output", "figures", "figure_9.pdf"), plot = figure_9_fun(), 
+       width = 8, height = 4.2, units = "in", useDingbats = FALSE)
+  
+
+```
+
+The `r housing_loss_2021` housing units taken off of Ottawa’s housing market in 2021 are only `r housing_loss_pct_dwelling` of the total amount of housing in the city, but this housing loss has been concentrated in small parts of the city. Figure \@ref(fig:housing_map) shows the proportion of each ward or dissemination area’s housing stock which was operated as a dedicated short-term rental as of the end of 2020. The maps show a tale of two cities: in most of Ottawa, there are relatively few dedicated STRs, while in the center of the city they are common. In the Byward Market neighbourhood, `r housing_loss_pct_byward` of all housing units were operating as dedicated STRs at the end of 2021, even in the face of Covid-19. The figure is `r housing_loss_pct_lowertown` for Lowertown. In the Sandy Hill/Lowertown CMHC zone (which includes Byward Market and Lowertown), the rental vacancy rate in late 2019 prior to the pandemic was 2.6%, while the number of STRs contributing to housing loss in Byward Market in late 2019 was `r housing_loss_pct_byward_2019`. This means that there were approximately the same number of dedicated STRs in this neighbourhood as there were vacant apartments for rent. Table \@ref(tab:tab-2-1) summarizes STR-induced housing loss patterns by neighbourhood. It demonstrates that the City-wide trend of shrinking dedicated STRs due to the pandemic holds in all neighbourhoods. However, Byward Market and Lowertown—the two neighbourhoods with the highest proportional share of dedicated STRs—also saw relatively small declines in dedicated STRs during the pandemic. 
+
+``` {r fig-9, include = TRUE, fig.cap = '(ref:housing_map)', fig.align = "center"}
+
+figure_9_fun()
+
+```
+
+(ref:housing_map) _The percentage of housing units converted to dedicated STRs in the City of Ottawa, by ward (L) and dissemination area (R)_
+
+
+
+\newpage
